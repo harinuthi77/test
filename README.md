@@ -130,6 +130,24 @@ Comprehensive test suite with 3+ positive & negative cases per function:
 
 ## 🎯 Features
 
+### ✅ **NEW: Cross-Session Learning & Adaptation**
+- **SQLite Learning Database** - Agents learn from every interaction
+  * Stores successful action patterns
+  * Records failures to avoid repeating mistakes
+  * Learns website-specific patterns
+  * Maintains memory across sessions
+  * Tracks results and confidence scores
+- **Agent Reflection** - Detects stuck states and adapts
+  * Identifies repetitive action loops
+  * Suggests alternative strategies when stuck
+  * Tracks progress metrics in real-time
+  * Provides actionable insights
+- **Smart Web Scraping** - Enhanced extraction capabilities
+  * Visual debugging (color-coded element labels)
+  * Auto data extraction (products, forms, tables)
+  * Pattern recognition for e-commerce sites
+  * De-duplication and filtering
+
 ### ✅ Production-Ready RAG
 - Vector embeddings (ChromaDB/Pinecone/Qdrant)
 - Hybrid search (vector + keyword)
@@ -343,19 +361,27 @@ tracker = CostTracker(
 ├── adaptive_agent.py                  # Original web scraping agent
 ├── unified_agent.py                   # Main interface (both modes)
 │
-├── rag_pipeline.py                    # RAG retrieval (keyword + vector)
-├── mcp_client.py                      # MCP tools (JSON-RPC 2.0)
-├── agent_framework.py                 # Multi-agent orchestration
+├── agent_framework.py                 # Multi-agent orchestration + LEARNING 🧠
 ├── tutoring_orchestrator.py           # Complete tutoring workflow
 ├── agent_transformer_optimizations.py # Transformer optimizations
+│
+├── rag_pipeline.py                    # RAG retrieval (keyword + vector)
+├── mcp_client.py                      # MCP tools (JSON-RPC 2.0)
+├── web_scraping_utils.py              # Smart extraction + visual debug 🆕
 │
 ├── security_utils.py                  # PII redaction, input validation
 ├── cost_tracker.py                    # Cost tracking and alerting
 │
-└── test_all_components.py             # Comprehensive test suite (53 tests)
+├── test_all_components.py             # Comprehensive test suite (53 tests)
+└── test_learning_features.py          # Learning features tests 🆕
 ```
 
-**Total: 10 core files + 1 test file + README**
+**Total: 11 core files + 2 test files + README**
+
+**🆕 New additions:**
+- `agent_framework.py` now includes `LearningDatabase` & `AgentReflection`
+- `web_scraping_utils.py` - visual debugging & auto extraction
+- `test_learning_features.py` - validates learning features
 
 ---
 
