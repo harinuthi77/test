@@ -1,9 +1,0 @@
-File Operations Test
-===================
-
-This file demonstrates Write capability.
-
-Line 1: Initial content
-Line 2: More content
-Line 3: Content successfully EDITED using Edit tool
-Line 4: Final line
