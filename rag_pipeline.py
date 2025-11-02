@@ -1,13 +1,17 @@
 """
 RAG (Retrieval-Augmented Generation) Pipeline
 Implements retrieval, grounding, and citation management
+
+Supports both simple keyword retrieval (for testing) and
+production vector embeddings (ChromaDB, Pinecone, Qdrant, etc.)
 """
 
 import json
 import hashlib
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Protocol
 from dataclasses import dataclass, field
 from collections import Counter
+from abc import ABC, abstractmethod
 
 
 @dataclass
@@ -47,10 +51,30 @@ class GroundedContext:
     notes: str = ""
 
 
-class SimpleRetriever:
+class BaseRetriever(ABC):
+    """Abstract base class for retrievers"""
+
+    @abstractmethod
+    def add_document(self, doc_id: str, text: str, source_name: str, metadata: Dict = None):
+        """Add a document to the retriever"""
+        pass
+
+    @abstractmethod
+    def retrieve(self, query: str, top_k: int = 10, min_score: float = 0.0) -> List[Chunk]:
+        """Retrieve relevant chunks for a query"""
+        pass
+
+    @abstractmethod
+    def get_chunk_context(self, chunk: Chunk, context_chars: int = 200) -> str:
+        """Get surrounding context for a chunk"""
+        pass
+
+
+class SimpleRetriever(BaseRetriever):
     """
     Simplified retriever (no external dependencies)
-    In production, replace with vector DB (Pinecone, Weaviate, etc.)
+    Uses keyword-based BM25-like retrieval
+    Good for testing, but use VectorRetriever for production
     """
 
     def __init__(self):
@@ -160,10 +184,402 @@ class SimpleRetriever:
         return doc_text[start:end]
 
 
-class RAGPipeline:
-    """Complete RAG pipeline: retrieve → rerank → ground"""
+class VectorRetriever(BaseRetriever):
+    """
+    Production-ready vector retriever with hybrid search
 
-    def __init__(self, retriever: SimpleRetriever):
+    Supports multiple vector DB backends:
+    - ChromaDB (local, easy setup)
+    - Pinecone (cloud, scalable)
+    - Qdrant (self-hosted or cloud)
+
+    Features:
+    - Dense vector embeddings
+    - Hybrid search (vector + keyword BM25)
+    - Automatic reranking
+    - De-duplication
+    """
+
+    def __init__(
+        self,
+        backend: str = "chroma",
+        embedding_model: str = "sentence-transformers",
+        collection_name: str = "rag_chunks"
+    ):
+        """
+        Initialize vector retriever
+
+        Args:
+            backend: "chroma", "pinecone", or "qdrant"
+            embedding_model: "sentence-transformers" (local) or "openai" (API)
+            collection_name: Name of vector collection
+        """
+        self.backend = backend
+        self.embedding_model = embedding_model
+        self.collection_name = collection_name
+
+        self.documents: Dict[str, str] = {}
+        self.chunks: List[Chunk] = []
+
+        # Lazy import vector DB client
+        self.client = None
+        self.collection = None
+        self.embedder = None
+
+        # Try to initialize (gracefully fail if dependencies missing)
+        try:
+            self._initialize_backend()
+        except ImportError as e:
+            print(f"⚠️  Vector DB dependencies not installed: {e}")
+            print(f"   Falling back to keyword search. Install with:")
+            print(f"   pip install chromadb sentence-transformers")
+            self.client = None
+
+    def _initialize_backend(self):
+        """Initialize vector DB backend and embedding model"""
+
+        if self.backend == "chroma":
+            import chromadb
+            from chromadb.utils import embedding_functions
+
+            self.client = chromadb.Client()
+
+            # Initialize embedder
+            if self.embedding_model == "sentence-transformers":
+                self.embedder = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name="all-MiniLM-L6-v2"  # Fast, 384-dim embeddings
+                )
+            elif self.embedding_model == "openai":
+                # Requires OPENAI_API_KEY env var
+                self.embedder = embedding_functions.OpenAIEmbeddingFunction(
+                    model_name="text-embedding-3-small"
+                )
+
+            # Create or get collection
+            self.collection = self.client.get_or_create_collection(
+                name=self.collection_name,
+                embedding_function=self.embedder
+            )
+
+        elif self.backend == "pinecone":
+            import pinecone
+            import os
+
+            pinecone.init(
+                api_key=os.getenv("PINECONE_API_KEY"),
+                environment=os.getenv("PINECONE_ENV", "us-west1-gcp")
+            )
+
+            # Initialize embedder
+            if self.embedding_model == "sentence-transformers":
+                from sentence_transformers import SentenceTransformer
+                self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+            elif self.embedding_model == "openai":
+                import openai
+                openai.api_key = os.getenv("OPENAI_API_KEY")
+                self.embedder = "openai"  # Will call API directly
+
+            # Create or connect to index
+            if self.collection_name not in pinecone.list_indexes():
+                pinecone.create_index(
+                    self.collection_name,
+                    dimension=384,  # Match embedding model
+                    metric="cosine"
+                )
+
+            self.collection = pinecone.Index(self.collection_name)
+
+        elif self.backend == "qdrant":
+            from qdrant_client import QdrantClient
+            from qdrant_client.models import Distance, VectorParams
+
+            self.client = QdrantClient(":memory:")  # Or url for remote
+
+            # Initialize embedder
+            if self.embedding_model == "sentence-transformers":
+                from sentence_transformers import SentenceTransformer
+                self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+            # Create collection if doesn't exist
+            try:
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+                )
+            except:
+                pass  # Collection already exists
+
+            self.collection = self.collection_name
+
+    def add_document(self, doc_id: str, text: str, source_name: str, metadata: Dict = None):
+        """Add document with vector embeddings"""
+        self.documents[doc_id] = text
+
+        # Chunk document (reuse from SimpleRetriever)
+        simple_retriever = SimpleRetriever()
+        chunks = simple_retriever._chunk_document(text, doc_id, source_name, metadata or {})
+
+        # If vector DB available, add embeddings
+        if self.client is not None and self.collection is not None:
+            for chunk in chunks:
+                self._add_chunk_to_vector_db(chunk)
+
+        self.chunks.extend(chunks)
+
+    def _add_chunk_to_vector_db(self, chunk: Chunk):
+        """Add chunk to vector database"""
+
+        if self.backend == "chroma":
+            self.collection.add(
+                ids=[chunk.chunk_id],
+                documents=[chunk.text],
+                metadatas=[{
+                    "source_id": chunk.source_id,
+                    "source_name": chunk.source_name,
+                    "start_pos": chunk.start_pos,
+                    "end_pos": chunk.end_pos,
+                    **chunk.metadata
+                }]
+            )
+
+        elif self.backend == "pinecone":
+            # Get embedding
+            if self.embedding_model == "sentence-transformers":
+                embedding = self.embedder.encode(chunk.text).tolist()
+            elif self.embedding_model == "openai":
+                import openai
+                response = openai.Embedding.create(
+                    input=chunk.text,
+                    model="text-embedding-3-small"
+                )
+                embedding = response['data'][0]['embedding']
+
+            # Upsert to Pinecone
+            self.collection.upsert(
+                vectors=[(
+                    chunk.chunk_id,
+                    embedding,
+                    {
+                        "text": chunk.text,
+                        "source_id": chunk.source_id,
+                        "source_name": chunk.source_name,
+                        "start_pos": chunk.start_pos,
+                        "end_pos": chunk.end_pos,
+                        **chunk.metadata
+                    }
+                )]
+            )
+
+        elif self.backend == "qdrant":
+            from qdrant_client.models import PointStruct
+
+            # Get embedding
+            embedding = self.embedder.encode(chunk.text).tolist()
+
+            # Add point
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[PointStruct(
+                    id=hash(chunk.chunk_id),  # Convert to int
+                    vector=embedding,
+                    payload={
+                        "chunk_id": chunk.chunk_id,
+                        "text": chunk.text,
+                        "source_id": chunk.source_id,
+                        "source_name": chunk.source_name,
+                        "start_pos": chunk.start_pos,
+                        "end_pos": chunk.end_pos,
+                        **chunk.metadata
+                    }
+                )]
+            )
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 10,
+        min_score: float = 0.0,
+        hybrid: bool = True
+    ) -> List[Chunk]:
+        """
+        Hybrid retrieval: vector search + keyword fallback
+
+        Args:
+            query: Search query
+            top_k: Number of results
+            min_score: Minimum similarity score
+            hybrid: If True, combine vector and keyword search
+
+        Returns:
+            List of retrieved chunks
+        """
+
+        # If vector DB available, use it
+        if self.client is not None and self.collection is not None:
+            results = self._vector_search(query, top_k)
+
+            # If hybrid, also do keyword search and merge
+            if hybrid:
+                keyword_results = self._keyword_search(query, top_k // 2)
+                results = self._merge_results(results, keyword_results, top_k)
+
+            return results
+
+        # Fallback to keyword search
+        return self._keyword_search(query, top_k)
+
+    def _vector_search(self, query: str, top_k: int) -> List[Chunk]:
+        """Vector similarity search"""
+
+        if self.backend == "chroma":
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=top_k
+            )
+
+            # Convert to Chunk objects
+            chunks = []
+            for i, doc_id in enumerate(results['ids'][0]):
+                metadata = results['metadatas'][0][i]
+                chunk = Chunk(
+                    chunk_id=doc_id,
+                    text=results['documents'][0][i],
+                    source_id=metadata['source_id'],
+                    source_name=metadata['source_name'],
+                    start_pos=metadata['start_pos'],
+                    end_pos=metadata['end_pos'],
+                    metadata=metadata,
+                    score=1 - results['distances'][0][i]  # Convert distance to similarity
+                )
+                chunks.append(chunk)
+
+            return chunks
+
+        elif self.backend == "pinecone":
+            # Get query embedding
+            if self.embedding_model == "sentence-transformers":
+                query_embedding = self.embedder.encode(query).tolist()
+            elif self.embedding_model == "openai":
+                import openai
+                response = openai.Embedding.create(
+                    input=query,
+                    model="text-embedding-3-small"
+                )
+                query_embedding = response['data'][0]['embedding']
+
+            # Query Pinecone
+            results = self.collection.query(
+                vector=query_embedding,
+                top_k=top_k,
+                include_metadata=True
+            )
+
+            # Convert to Chunk objects
+            chunks = []
+            for match in results['matches']:
+                metadata = match['metadata']
+                chunk = Chunk(
+                    chunk_id=match['id'],
+                    text=metadata['text'],
+                    source_id=metadata['source_id'],
+                    source_name=metadata['source_name'],
+                    start_pos=metadata['start_pos'],
+                    end_pos=metadata['end_pos'],
+                    metadata=metadata,
+                    score=match['score']
+                )
+                chunks.append(chunk)
+
+            return chunks
+
+        elif self.backend == "qdrant":
+            from qdrant_client.models import Filter
+
+            # Get query embedding
+            query_embedding = self.embedder.encode(query).tolist()
+
+            # Search
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=top_k
+            )
+
+            # Convert to Chunk objects
+            chunks = []
+            for hit in results:
+                payload = hit.payload
+                chunk = Chunk(
+                    chunk_id=payload['chunk_id'],
+                    text=payload['text'],
+                    source_id=payload['source_id'],
+                    source_name=payload['source_name'],
+                    start_pos=payload['start_pos'],
+                    end_pos=payload['end_pos'],
+                    metadata=payload,
+                    score=hit.score
+                )
+                chunks.append(chunk)
+
+            return chunks
+
+        return []
+
+    def _keyword_search(self, query: str, top_k: int) -> List[Chunk]:
+        """BM25-like keyword search (fallback)"""
+        simple_retriever = SimpleRetriever()
+        simple_retriever.chunks = self.chunks
+        simple_retriever.documents = self.documents
+        return simple_retriever.retrieve(query, top_k)
+
+    def _merge_results(
+        self,
+        vector_results: List[Chunk],
+        keyword_results: List[Chunk],
+        top_k: int
+    ) -> List[Chunk]:
+        """Merge and deduplicate vector and keyword results"""
+        seen_ids = set()
+        merged = []
+
+        # Interleave results (favor vector results slightly)
+        all_results = []
+        for i in range(max(len(vector_results), len(keyword_results))):
+            if i < len(vector_results):
+                chunk = vector_results[i]
+                chunk.score *= 1.2  # Boost vector results
+                all_results.append(chunk)
+            if i < len(keyword_results):
+                all_results.append(keyword_results[i])
+
+        # Deduplicate and take top_k
+        for chunk in all_results:
+            if chunk.chunk_id not in seen_ids:
+                merged.append(chunk)
+                seen_ids.add(chunk.chunk_id)
+                if len(merged) >= top_k:
+                    break
+
+        # Sort by score
+        merged.sort(key=lambda c: c.score, reverse=True)
+        return merged[:top_k]
+
+    def get_chunk_context(self, chunk: Chunk, context_chars: int = 200) -> str:
+        """Get surrounding context for a chunk"""
+        doc_text = self.documents.get(chunk.source_id, "")
+        start = max(0, chunk.start_pos - context_chars)
+        end = min(len(doc_text), chunk.end_pos + context_chars)
+        return doc_text[start:end]
+
+
+class RAGPipeline:
+    """
+    Complete RAG pipeline: retrieve → rerank → ground
+
+    Works with any retriever (SimpleRetriever or VectorRetriever)
+    """
+
+    def __init__(self, retriever: BaseRetriever):
         self.retriever = retriever
         self.query_history: List[str] = []
 

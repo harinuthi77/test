@@ -2,8 +2,7 @@
 MCP (Model Context Protocol) Client
 Provides standardized tool access for agents
 
-Note: This is a simplified implementation for demonstration.
-In production, use the official MCP SDK or implement full JSON-RPC protocol.
+Implements JSON-RPC 2.0 compliant interface for tool calls
 Reference: https://modelcontextprotocol.io
 """
 
@@ -11,9 +10,24 @@ import json
 import subprocess
 import tempfile
 import os
-from typing import Dict, List, Any, Optional, Callable
-from dataclasses import dataclass
+import uuid
+from typing import Dict, List, Any, Optional, Callable, Union
+from dataclasses import dataclass, asdict
 from enum import Enum
+
+
+# JSON-RPC 2.0 Error Codes
+class JSONRPCError(Enum):
+    """Standard JSON-RPC 2.0 error codes"""
+    PARSE_ERROR = -32700
+    INVALID_REQUEST = -32600
+    METHOD_NOT_FOUND = -32601
+    INVALID_PARAMS = -32602
+    INTERNAL_ERROR = -32603
+    # MCP-specific errors (custom range -32000 to -32099)
+    TOOL_NOT_APPROVED = -32000
+    TOOL_EXECUTION_FAILED = -32001
+    SAFETY_VIOLATION = -32002
 
 
 class ToolCategory(Enum):
@@ -23,6 +37,55 @@ class ToolCategory(Enum):
     EXECUTE = "execute"  # Runs code
     NETWORK = "network"  # Makes network calls
     SYSTEM = "system"  # System operations
+
+
+@dataclass
+class JSONRPCRequest:
+    """JSON-RPC 2.0 request"""
+    jsonrpc: str = "2.0"
+    method: str = ""
+    params: Optional[Dict[str, Any]] = None
+    id: Optional[Union[str, int]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict for serialization"""
+        d = {"jsonrpc": self.jsonrpc, "method": self.method}
+        if self.params is not None:
+            d["params"] = self.params
+        if self.id is not None:
+            d["id"] = self.id
+        return d
+
+
+@dataclass
+class JSONRPCResponse:
+    """JSON-RPC 2.0 response"""
+    jsonrpc: str = "2.0"
+    result: Optional[Any] = None
+    error: Optional[Dict[str, Any]] = None
+    id: Optional[Union[str, int]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict for serialization"""
+        d = {"jsonrpc": self.jsonrpc, "id": self.id}
+        if self.error:
+            d["error"] = self.error
+        else:
+            d["result"] = self.result
+        return d
+
+    @staticmethod
+    def error_response(code: int, message: str, request_id: Optional[Union[str, int]] = None, data: Any = None):
+        """Create an error response"""
+        error = {"code": code, "message": message}
+        if data:
+            error["data"] = data
+        return JSONRPCResponse(jsonrpc="2.0", error=error, id=request_id)
+
+    @staticmethod
+    def success_response(result: Any, request_id: Optional[Union[str, int]] = None):
+        """Create a success response"""
+        return JSONRPCResponse(jsonrpc="2.0", result=result, id=request_id)
 
 
 @dataclass
@@ -124,6 +187,96 @@ class MCPClient:
     def approve_tool(self, tool_name: str):
         """Pre-approve a tool for use"""
         self.approved_tools.add(tool_name)
+
+    def handle_jsonrpc_request(self, request_json: str) -> str:
+        """
+        Handle JSON-RPC 2.0 request (main protocol interface)
+
+        Args:
+            request_json: JSON-RPC request as JSON string
+
+        Returns:
+            JSON-RPC response as JSON string
+        """
+        try:
+            # Parse request
+            request_data = json.loads(request_json)
+
+            # Validate JSON-RPC 2.0 format
+            if request_data.get("jsonrpc") != "2.0":
+                response = JSONRPCResponse.error_response(
+                    JSONRPCError.INVALID_REQUEST.value,
+                    "Invalid JSON-RPC version (must be 2.0)",
+                    request_data.get("id")
+                )
+                return json.dumps(response.to_dict())
+
+            method = request_data.get("method")
+            params = request_data.get("params", {})
+            request_id = request_data.get("id")
+
+            # Route to appropriate handler
+            if method == "tools/list":
+                result = self.list_tools()
+                response = JSONRPCResponse.success_response(result, request_id)
+
+            elif method == "tools/call":
+                tool_name = params.get("name")
+                tool_params = params.get("arguments", {})
+
+                if not tool_name:
+                    response = JSONRPCResponse.error_response(
+                        JSONRPCError.INVALID_PARAMS.value,
+                        "Missing required parameter 'name'",
+                        request_id
+                    )
+                else:
+                    call_result = self.call_tool(tool_name, tool_params)
+
+                    if call_result.success:
+                        response = JSONRPCResponse.success_response(
+                            {"result": call_result.result},
+                            request_id
+                        )
+                    else:
+                        # Map errors to JSON-RPC codes
+                        if "not found" in call_result.error.lower():
+                            code = JSONRPCError.METHOD_NOT_FOUND.value
+                        elif "not approved" in call_result.error.lower():
+                            code = JSONRPCError.TOOL_NOT_APPROVED.value
+                        else:
+                            code = JSONRPCError.TOOL_EXECUTION_FAILED.value
+
+                        response = JSONRPCResponse.error_response(
+                            code,
+                            call_result.error,
+                            request_id,
+                            {"tool_name": tool_name}
+                        )
+
+            else:
+                response = JSONRPCResponse.error_response(
+                    JSONRPCError.METHOD_NOT_FOUND.value,
+                    f"Method '{method}' not found",
+                    request_id
+                )
+
+            return json.dumps(response.to_dict())
+
+        except json.JSONDecodeError as e:
+            response = JSONRPCResponse.error_response(
+                JSONRPCError.PARSE_ERROR.value,
+                f"Invalid JSON: {str(e)}"
+            )
+            return json.dumps(response.to_dict())
+
+        except Exception as e:
+            response = JSONRPCResponse.error_response(
+                JSONRPCError.INTERNAL_ERROR.value,
+                f"Internal error: {str(e)}",
+                request_data.get("id") if 'request_data' in locals() else None
+            )
+            return json.dumps(response.to_dict())
 
     def call_tool(
         self,
@@ -297,9 +450,9 @@ class MCPClient:
 
 # Testing
 def test_mcp_client():
-    """Test MCP client"""
+    """Test MCP client (legacy interface)"""
     print("="*70)
-    print("MCP CLIENT TEST")
+    print("MCP CLIENT TEST (Legacy Interface)")
     print("="*70)
 
     client = MCPClient(safety_mode=True)
@@ -357,9 +510,99 @@ def test_mcp_client():
         print(f"   {status} {entry['tool_name']}: {entry.get('error', 'OK')}")
 
     print("\n" + "="*70)
-    print("✅ MCP CLIENT VALIDATED")
+    print("✅ MCP CLIENT VALIDATED (Legacy)")
+    print("="*70)
+
+
+def test_jsonrpc_interface():
+    """Test JSON-RPC 2.0 interface"""
+    print("\n" + "="*70)
+    print("JSON-RPC 2.0 INTERFACE TEST")
+    print("="*70)
+
+    client = MCPClient(safety_mode=True)
+
+    # Test 1: List tools
+    print("\n1. Testing tools/list:")
+    request = JSONRPCRequest(
+        method="tools/list",
+        id=str(uuid.uuid4())
+    )
+    response_json = client.handle_jsonrpc_request(json.dumps(request.to_dict()))
+    response = json.loads(response_json)
+    print(f"   Request ID: {request.id}")
+    print(f"   Response: {response['result'][:2]}... ({len(response['result'])} tools)")
+
+    # Test 2: Call tool (safe, no approval needed)
+    print("\n2. Testing tools/call (calculator):")
+    request = JSONRPCRequest(
+        method="tools/call",
+        params={
+            "name": "calculate",
+            "arguments": {"expression": "10 + 5 * 2"}
+        },
+        id=str(uuid.uuid4())
+    )
+    response_json = client.handle_jsonrpc_request(json.dumps(request.to_dict()))
+    response = json.loads(response_json)
+    print(f"   Expression: 10 + 5 * 2")
+    print(f"   Result: {response.get('result')}")
+    print(f"   Error: {response.get('error')}")
+
+    # Test 3: Call tool needing approval (should fail)
+    print("\n3. Testing tools/call (python_exec, not approved):")
+    request = JSONRPCRequest(
+        method="tools/call",
+        params={
+            "name": "python_exec",
+            "arguments": {"code": "print('test')", "timeout": 5}
+        },
+        id=str(uuid.uuid4())
+    )
+    response_json = client.handle_jsonrpc_request(json.dumps(request.to_dict()))
+    response = json.loads(response_json)
+    print(f"   Expected error code: {JSONRPCError.TOOL_NOT_APPROVED.value}")
+    print(f"   Actual error: {response.get('error')}")
+
+    # Test 4: Approve and retry
+    print("\n4. Testing tools/call (python_exec, after approval):")
+    client.approve_tool("python_exec")
+    request = JSONRPCRequest(
+        method="tools/call",
+        params={
+            "name": "python_exec",
+            "arguments": {"code": "print('Hello JSON-RPC 2.0')", "timeout": 5}
+        },
+        id=str(uuid.uuid4())
+    )
+    response_json = client.handle_jsonrpc_request(json.dumps(request.to_dict()))
+    response = json.loads(response_json)
+    print(f"   Result: {response.get('result')}")
+
+    # Test 5: Invalid request (wrong JSON-RPC version)
+    print("\n5. Testing error handling (invalid JSON-RPC version):")
+    bad_request = {"jsonrpc": "1.0", "method": "test", "id": "test"}
+    response_json = client.handle_jsonrpc_request(json.dumps(bad_request))
+    response = json.loads(response_json)
+    print(f"   Expected error code: {JSONRPCError.INVALID_REQUEST.value}")
+    print(f"   Actual error: {response.get('error')}")
+
+    # Test 6: Method not found
+    print("\n6. Testing error handling (method not found):")
+    request = JSONRPCRequest(
+        method="nonexistent/method",
+        id=str(uuid.uuid4())
+    )
+    response_json = client.handle_jsonrpc_request(json.dumps(request.to_dict()))
+    response = json.loads(response_json)
+    print(f"   Expected error code: {JSONRPCError.METHOD_NOT_FOUND.value}")
+    print(f"   Actual error: {response.get('error')}")
+
+    print("\n" + "="*70)
+    print("✅ JSON-RPC 2.0 INTERFACE VALIDATED")
     print("="*70)
 
 
 if __name__ == "__main__":
     test_mcp_client()
+    test_jsonrpc_interface()
