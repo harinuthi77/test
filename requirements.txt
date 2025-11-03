@@ -1,0 +1,27 @@
+# Core dependencies for Unified Adaptive Agent
+# Multi-agent tutoring system + web scraping
+
+# Anthropic API for Claude
+anthropic>=0.21.0,<1.0.0
+
+# Web scraping (required for adaptive_agent.py)
+playwright>=1.40.0,<2.0.0
+
+# Scientific computing
+numpy>=1.24.0,<2.0.0
+
+# Optional: Vector DB support for production RAG
+# Uncomment based on chosen vector DB:
+# chromadb>=0.4.0  # Local vector DB
+# pinecone-client>=2.2.0  # Cloud vector DB
+# qdrant-client>=1.7.0  # Self-hosted or cloud
+
+# Optional: Enhanced embeddings
+# sentence-transformers>=2.2.0  # For local embeddings
+# openai>=1.0.0  # For OpenAI embeddings (text-embedding-3-small)
+
+# Development dependencies (optional)
+# pytest>=7.4.0  # Testing
+# black>=23.0.0  # Code formatting
+# ruff>=0.1.0  # Linting
+# bandit>=1.7.0  # Security scanning
