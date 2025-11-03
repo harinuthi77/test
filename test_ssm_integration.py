@@ -16,19 +16,20 @@ import numpy as np
 from typing import List, Dict
 import sys
 
-from ssm_mamba_core import (
+# Import from consolidated module
+from ssm_adaptive_system import (
+    # Core
     MambaLayer, AttentionBridge, HybridSSMTransformer,
     SSMState, SSMStateManager,
-    compute_sequence_length_signal, compute_hardness_signal
-)
-from adaptive_scheduler import (
+    # Scheduler
     AdaptiveScheduler, SchedulerSignals, ExecutionPath,
     ReasoningEngine, SupervisionMonitor,
-    compute_signals_from_request
-)
-from ssm_integration import (
+    # Integration
     SSMEnhancedAgent, SSMAgentConfig,
-    SSMSupervisedOrchestrator, rag_chunks_to_spans
+    SSMSupervisedOrchestrator,
+    # Utilities
+    compute_sequence_length_signal, compute_hardness_signal,
+    compute_signals_from_request, rag_chunks_to_spans
 )
 
 

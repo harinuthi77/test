@@ -107,7 +107,7 @@ result = agent.teach(
    - Cost regression detection
    - Export to CSV/JSON
 
-8. **SSM/Mamba Architecture** (`ssm_mamba_core.py`, `adaptive_scheduler.py`, `ssm_integration.py`) **✨ NEW**
+8. **SSM/Mamba Adaptive System** (`ssm_adaptive_system.py`) **✨ NEW**
    - **Hybrid SSM + Attention Bridge:** O(L) inference time vs O(L²) for pure attention
    - **Adaptive Scheduler:** Routes requests by signals (L=length, R=RAG spans, H=hardness, T=streaming)
    - **Streaming Supervision:** Real-time monitoring of sub-agents with compact recurrent state
@@ -390,8 +390,7 @@ tracker.print_summary()
 ### Example 6: SSM/Mamba Adaptive Tutor **✨ NEW**
 
 ```python
-from ssm_integration import SSMEnhancedAgent, SSMAgentConfig, rag_chunks_to_spans
-from adaptive_scheduler import compute_signals_from_request
+from ssm_adaptive_system import SSMEnhancedAgent, SSMAgentConfig, rag_chunks_to_spans
 
 # Configure SSM-enhanced agent
 config = SSMAgentConfig(

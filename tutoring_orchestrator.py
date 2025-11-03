@@ -269,7 +269,12 @@ Output as JSON with format:
         # Build comprehensive query from task and plan
         query_parts = [task.topic]
         if "concepts" in plan:
-            query_parts.extend(plan["concepts"][:3])
+            # Ensure we only add strings, not dicts
+            for concept in plan["concepts"][:3]:
+                if isinstance(concept, str):
+                    query_parts.append(concept)
+                elif isinstance(concept, dict) and 'name' in concept:
+                    query_parts.append(concept['name'])
 
         query = " ".join(query_parts)
 
