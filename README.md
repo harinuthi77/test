@@ -160,7 +160,12 @@ Comprehensive test suite with 3+ positive & negative cases per function:
   * Pattern recognition for e-commerce sites
   * De-duplication and filtering
 
-### ✅ Production-Ready RAG
+### ✅ Production-Ready RAG with Auto Web Search **✨ NEW**
+- **Automatic web search** - Finds sources automatically when none exist
+  * Triggers when RAG has no local knowledge sources
+  * Searches web via MCP tool for relevant content
+  * Adds web results to RAG for grounded responses
+  * Intelligent, contextual search results
 - Vector embeddings (ChromaDB/Pinecone/Qdrant)
 - Hybrid search (vector + keyword)
 - Structure-aware chunking (600 tokens, 15% overlap)

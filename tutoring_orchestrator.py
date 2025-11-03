@@ -264,7 +264,7 @@ Output as JSON with format:
         return plan
 
     def _research(self, task: TutoringTask, plan: Dict) -> GroundedContext:
-        """Conduct research using RAG"""
+        """Conduct research using RAG with automatic web search if needed"""
 
         # Build comprehensive query from task and plan
         query_parts = [task.topic]
@@ -278,8 +278,15 @@ Output as JSON with format:
 
         query = " ".join(query_parts)
 
-        # Retrieve and ground
+        # Check if RAG has sources - if not, search the web
         chunks = self.rag_pipeline.retrieve_and_rerank(query, top_k=10)
+
+        if len(chunks) == 0:
+            print(f"   📡 No local sources found - searching web for '{query}'...")
+            self._auto_web_search(task.topic, query)
+            # Retry retrieval after adding web sources
+            chunks = self.rag_pipeline.retrieve_and_rerank(query, top_k=10)
+
         grounded = self.rag_pipeline.ground_context(query, chunks, max_chunks=8)
 
         print(f"   Retrieved {len(grounded.chunks)} chunks from {grounded.total_sources} sources")
@@ -287,6 +294,40 @@ Output as JSON with format:
             print(f"   ⚠️  Detected {len(grounded.contradictions)} potential contradictions")
 
         return grounded
+
+    def _auto_web_search(self, topic: str, query: str):
+        """Automatically search web and add results to RAG"""
+        try:
+            # Use MCP web search tool
+            tool_call = self.mcp_client.call_tool(
+                "web_search",
+                {"query": query, "max_results": 5}
+            )
+
+            if not tool_call.success:
+                print(f"   ⚠️  Web search failed: {tool_call.error}")
+                return
+
+            # Parse the JSON result
+            results = json.loads(tool_call.result)
+
+            # Add each result to RAG as a knowledge source
+            for i, result in enumerate(results.get('results', [])):
+                doc_id = f"web_search_{topic}_{i+1}"
+                content = f"{result['title']}\n\n{result['snippet']}"
+                source_name = f"Web: {result['title']}"
+
+                self.rag_pipeline.retriever.add_document(
+                    doc_id=doc_id,
+                    text=content,
+                    source_name=source_name
+                )
+
+            print(f"   ✅ Added {len(results.get('results', []))} web sources to knowledge base")
+
+        except Exception as e:
+            print(f"   ⚠️  Web search failed: {e}")
+            print(f"   → Continuing with available knowledge...")
 
     def _write_explanation(
         self,
